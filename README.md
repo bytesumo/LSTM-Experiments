@@ -12,9 +12,13 @@ http://apaszke.github.io/lstm-explained.html
 Current experiment design:
 
 a. stream in csv timeseries data (don't read it all in at once)
+
 b. feed this data into the example lstm, row at a time
+
 c. push the lstm output into a little feed forward net
+
 d. do some training - to make it simple, train on the first x rows of the timeseries, then guess the remainder
+
 e. print the predictions, alongside the actual to get a sense of whether it worked
 
 to run:
