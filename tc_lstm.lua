@@ -256,7 +256,7 @@ for line in f:lines() do
     -- (2) accumulate gradients
     mlp:backward(mlp_inputdata, criterion:backward(mlp.output, feed_output))
     -- (3) update parameters with a 0.01 learning rate
-    mlp:updateParameters(0.5)
+    mlp:updateParameters(0.1)
   
   else
   
