@@ -64,6 +64,7 @@ network's predictions alongside the training target "output" values for inspecti
 require 'nn'
 require 'nngraph'
 require 'csv'
+require 'rnn'
 
 LSTM = require 'LSTM.lua'
 
@@ -131,6 +132,8 @@ local mlp_output_size = 2
 
 network = {LSTM.create(input_size,hidden_size), LSTM.create(hidden_size,hidden_size), LSTM.create(hidden_size, output_size)}
 
+criterion = nn.MSECriterion() 
+
 -- INITITALISE it's internal states
 
 local previous_state = {
@@ -150,7 +153,7 @@ mlp:add(nn.Linear(mlp_input_size, mlp_hidden_size))
 mlp:add(nn.Tanh())
 mlp:add(nn.Linear(mlp_hidden_size, mlp_hidden_size2))  
 mlp:add(nn.Tanh())
-mlp:add(nn.Linear(mlp_hidden_size, mlp_output_size))  
+mlp:add(nn.Linear(mlp_hidden_size2, mlp_output_size))  
 
 -- set out the learning criterion for the mlp layer
 criterion = nn.MSECriterion() 
@@ -208,9 +211,9 @@ for line in f:lines() do
         --print(feed_input)
         -- construct training labels
         if line.char_output == "U" then        -- transform our char class [U,D] into two nodes of binary outputs
-              feed_output = torch.Tensor({1,0})
+              feed_output = torch.Tensor({{1,0}})
         else
-              feed_output = torch.Tensor({0,1})   
+              feed_output = torch.Tensor({{0,1}})   
         end        
         
         -- forward pass, puts the inputs into the rnn, plus prev state
@@ -256,7 +259,7 @@ for line in f:lines() do
     -- (2) accumulate gradients
     mlp:backward(mlp_inputdata, criterion:backward(mlp.output, feed_output))
     -- (3) update parameters with a 0.01 learning rate
-    mlp:updateParameters(0.1)
+    mlp:updateParameters(0.01)
   
   else
   
