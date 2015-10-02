@@ -14,7 +14,7 @@ local whohow = [[
                 
 
 
-  Example LSTM.
+  Example LSTM experiements
 
   Copyright 2015, ByteSumo Limited (Andrew J Morgan)
 
@@ -44,7 +44,7 @@ Copy this script and modify the working parameters for:
   - the number of input, hidden, and output nodes
   - the field mappings, between your csv and internal variables
   - to include any transformations needed to your raw data, to prepare it for the RNN
-  - to set out the training OFFSET treshold. 
+  - to set out the training OFFSET treshold. This will train in one pass up to threshold.
   - run the script using torch, not plain luajit. www.torch.ch
   
 Note:
@@ -61,28 +61,28 @@ network's predictions alongside the training target "output" values for inspecti
 
 -- print(whohow)
 
-require 'nn'
-require 'nngraph'
-require 'csv'
+
+--[[ require libraries ]]--
+-- require 'nn'
+-- require 'dp'
+--require 'nngraph'
 require 'rnn'
+local csv = require("csv")
 
-LSTM = require 'LSTM.lua'
+--[[ configure csv reading]]--
 
----------------------------------------------------------------------------------------
----- CONFIGURE csv file input source, and column aliases
 
 local filename = "dp_10_train_DJI_min.csv"
 local threshold = 100000                     -- train up to this offset, then predict.
+local csvparams ={}
+csvparams.header = true
+csvparams.separator = ","
 
-local params ={}
-params.header = true
-params.separator = ","
-
-
+ -- timeseries data in csv note:
  -- use this params list to map columns/headers in your csv file to our internal variable names. Note "output" is to be mapped to "trend" but we need to 
  -- do some preprocessing to convert it from a char binomial output to a binary output on two output nodes, i.e.: [1,0] or [0,1]
  
-params.columns = {  -- we list possible header aliases, and map them to our stable var
+csvparams.columns = {  -- we list possible header aliases, and map them to our stable var
                     tseries  = { names = {"TCFG", "symbol", "instrument", "id"}},  
                     percent_change  = { names = {"unit_per_change", "percent_change", "relative_change"}},
                     char_output  = { names = {"trend"}},
@@ -116,69 +116,66 @@ params.columns = {  -- we list possible header aliases, and map them to our stab
                     t27  = { names = {"T27"}}
                  }                 
                  
----------------------------------------------------------------------------------------
----- DEFINE the LSTM size, structure, and initialise
 
-local input_size = 28
-local hidden_size = 300
-local output_size = 300
 
-local mlp_input_size = output_size
-local mlp_hidden_size = 300
-local mlp_hidden_size2 = 300
-local mlp_output_size = 2
+--[[ model definition params ]]--
 
--- BUILD the LSTM structure
 
-network = {LSTM.create(input_size,hidden_size), LSTM.create(hidden_size,hidden_size), LSTM.create(hidden_size, output_size)}
+local inputSize = 28
+local hiddenSize = 28
+local outputSize = 2
+local dropoutProb = 0.5
+local rho = 6
+local lr = 0.01
 
-criterion = nn.MSECriterion() 
 
--- INITITALISE it's internal states
+--[[ build up model definition ]]--
 
-local previous_state = {
-  {torch.zeros(1, hidden_size), torch.zeros(1,hidden_size)}, -- was previously    torch.zeros(1,output_size)}
-  {torch.zeros(1, hidden_size), torch.zeros(1,hidden_size)},
-  {torch.zeros(1, output_size), torch.zeros(1,output_size)}
-  }
-local output = nil
-local next_state = {}
-local feed_input = nil
+print("error in model definition?")
 
----------------------------------------------------------------------------------------
----- DEFINE the final MLP final learning layers
+tmodel = nn.Sequential()
+-- tmodel:add(nn.Sequencer(nn.Identity()))
+tmodel:add(nn.Sequencer(nn.FastLSTM(inputSize, hiddenSize, rho)))
+tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, outputSize)))
 
-mlp = nn.Sequential();  -- make a multi-layer perceptron
-mlp:add(nn.Linear(mlp_input_size, mlp_hidden_size))
-mlp:add(nn.Tanh())
-mlp:add(nn.Linear(mlp_hidden_size, mlp_hidden_size2))  
-mlp:add(nn.Tanh())
-mlp:add(nn.Linear(mlp_hidden_size2, mlp_output_size))  
+criterion = nn.SequencerCriterion(nn.MSECriterion())
 
--- set out the learning criterion for the mlp layer
-criterion = nn.MSECriterion() 
-local mlp_inputdata = nil
-local feed_output = nil
+print("If I see this, then probably not")
 
-local prediction_output = nil
+--[[ set out learning functions ]]--
 
----------------------------------------------------------------------------------------
----- FEED THE NETWORK WITH VALUES
 
-local offset = 0
+function gradientUpgrade(model, x, y, criterion, learningRate, i)
+	local prediction = model:forward(x)
+	local err = criterion:forward(prediction, y)
+   if i % 100 == 0 then
+      print('error for iteration ' .. i  .. ' is ' .. err/rho)
+   end
+	local gradOutputs = criterion:backward(prediction, y)
+	model:backward(x, gradOutputs)
+	model:updateParameters(learningRate)
+  model:zeroGradParameters()
+end
+
+
+--[[ FEED THE NETWORK WITH VALUES ]]--
+
+
 -- Open file iterator:
-local csv = require("csv")
+local offset = 0
 local f = csv.open(filename, params)
 
-
+-- create structured lua tables from csv
+feed_input = {}     -- create a table to hold our input data we'll use to predict
+feed_output = {}    -- create a table to hold our target outputs to train against
+feed_offsets = {}   -- create a table to hold our batch offset references
 
 for line in f:lines() do
-  offset = offset + 1
-  
-        -- INPUT TENSOR from CSV
-        -- use this line to create the tensor input to the rnn "feed_input"
-        
-              feed_input = torch.Tensor({{  line.percent_change    ---- note very carefully the TWO curly braces on this line. {{ }} is tensor(1,n) that we need
+    offset = offset + 1  
+    -- We load up our data row by row into a table, then after 100 rows, we flush to tensor, and feed it to the training as a mini-batch
+                
+                feed_input[offset] = {  -- insert inputs into standard training dataset table, indexed by this offset
+                                            line.percent_change             
                                           , line.t1
                                           , line.t2
                                           , line.t3
@@ -206,71 +203,50 @@ for line in f:lines() do
                                           , line.t25
                                           , line.t26
                                           , line.t27
-                                         }}
-                                       )
-        --print(feed_input)
-        -- construct training labels
-        if line.char_output == "U" then        -- transform our char class [U,D] into two nodes of binary outputs
-              feed_output = torch.Tensor({{1,0}})
-        else
-              feed_output = torch.Tensor({{0,1}})   
-        end        
+                                         }
+                                      -- )
+                -- construct training labels to learn
+                if line.char_output == "U" then        -- transform our char class [U,D] into two nodes of numeric [1,1] outputs
+                      feed_output[offset] = {1, -1}  --  torch.Tensor({1,0}) 
+                else
+                      feed_output[offset] = {-1, 1} -- torch.Tensor({0,1})   
+                end   
+                
+                -- create an index of the offsets, needed for batch processing
+                table.insert(feed_offsets, offset)
         
-        -- forward pass, puts the inputs into the rnn, plus prev state
-        local layer_input = {feed_input, table.unpack(previous_state[1])}
-        --print ("this is the  layer_input")
-        --print(layer_input)
+        
+        --[[ TRAIN THE RNN ]]--
 
-    -- push the inputs through the rnn to get the output
-      for l = 1, #network do 
-                  -- forward the input          
-            local layer_output = network[l]:forward(layer_input)
-                  -- save output state for next iteration
+
+        if offset < threshold and offset % 100 == 0 then
+          
+          -- now I have a batch size of 100 records, convert tables to tensors
+          --local tensor_input = torch.Tensor(feed_input)
+          --local tensor_output = torch.Tensor(feed_output)
+          --local tensor_offsets = torch.Tensor(feed_offsets)
+          
+          -- now send the batch to learning
+          
+          gradientUpgrade(tmodel, feed_input, feed_output, criterion, lr, offset)
+          
+          -- now clear out the tables, reset them     
+          feed_input = nil
+          feed_input = {}
+          feed_output = nil
+          feed_output = {}
+          feed_offsets = nil
+          feed_offsets = {}
+        end
+        
+        if offset > threshold then
+          
+            -- TEST OF PREDICTION --
+            local prediction_output = tmodel:forward(feed_input[offset])
+            print(line.char_output, prediction_output)
             
-            table.insert(next_state, layer_output)
-                  -- extract hidden state from output
-                  
-            local layer_h = layer_output[2]
-                  -- prepare next layer's input or set the output
-                  
-            if l < #network then
-              layer_input = {layer_h, table.unpack(previous_state[l + 1])}
-              
-            else
-              output = layer_h
-            end
-      end -- of LSTM layer
-      
-      mlp_inputdata = output
+        end
 
----------------------------------------------------------------------------------------
----- TRAIN THE NETWORK AGAINST OUTPUTS
--- Now we have the results of the LSTM module, we can build a normal MPL layer to train to the output
+  end -- end of csv iterator
+  
 
- ---[[
-  if offset < threshold then
-    
-    -- feed it to the neural network and the criterion
-    criterion:forward(mlp:forward(mlp_inputdata), feed_output)
-
-    -- train over this example in 3 steps
-    -- (1) zero the accumulation of the gradients
-    mlp:zeroGradParameters()
-    -- (2) accumulate gradients
-    mlp:backward(mlp_inputdata, criterion:backward(mlp.output, feed_output))
-    -- (3) update parameters with a 0.01 learning rate
-    mlp:updateParameters(0.01)
-  
-  else
-  
-  -- the network is trained a tiny bit on the data up to "threshold" records, then I output predictions against the test values...
-  
-  prediction_output = mlp:forward(mlp_inputdata)
-
-  print(line.char_output, prediction_output)
-  end
-  
-  --]]
-  --print(mlp_inputdata)
-  
-end -- of the file iterator
