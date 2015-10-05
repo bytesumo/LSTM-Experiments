@@ -73,6 +73,8 @@ require 'rnn'
 require 'cltorch'
 require 'clnn'
 require 'pprint'
+require 'nn'
+require 'math'
 
 --[[ configure csv reading]]--
 
@@ -127,32 +129,45 @@ csvparams.columns = {  -- we list possible header aliases, and map them to our s
 
 local threshold = 100000  -- train up to this offset in the file, then predict.
 local inputSize = 28      -- the number features in the csv file to use as inputs 
-local hiddenSize = 50     -- the number of hidden nodes
+local hiddenSize = 1000     -- the number of hidden nodes
+local hiddenSize2 = 500     -- the second hidden layer
 local outputSize = 2      -- the number of outputs representing the prediction targat. 
-local dropoutProb = 0.2   -- a dropout probability, might help with generalisation
-local rho = 50            -- the timestep history we'll recurse back in time when we apply gradient learning
-local batchSize = 200     -- the size of the episode/batch of sequenced timeseries we'll feed the rnn
-local lr = 0.001          -- the learning rate to apply to the weights
+local dropoutProb = 0.1   -- a dropout probability, might help with generalisation
+local rho = 100            -- the timestep history we'll recurse back in time when we apply gradient learning
+local batchSize = 100     -- the size of the episode/batch of sequenced timeseries we'll feed the rnn
+local lr = 0.01        -- the learning rate to apply to the weights
 
 --[[ build up model definition ]]--
 
 -- create a trend guessing model, "tmodel"
-tmodel = nn.Sequential()   -- wrapping it all in Sequential brings forward / backward methods to all layers in one go
-tmodel:add(nn.Sequencer(nn.Identity())) -- untransfomed input data
-tmodel:add(nn.Sequencer(nn.FastLSTM(inputSize, hiddenSize, rho)))  -- will create a complex network of lstm cells that learns back rho timesteps
-tmodel:add(nn.Sequencer(nn.Dropout(dropoutProb)))                  -- I'm sticking in a place to do dropout, not strickly needed I don't think
-tmodel:add(nn.Sequencer(nn.FastLSTM(hiddenSize, hiddenSize, rho))) -- creating a second layer of lstm cells, coz I can 
-tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, outputSize)))        -- reduce the output back down to the output class nodes
-tmodel:add(nn.Sequencer(nn.LogSoftMax()))                          -- apply the log soft max, as we're guessing classes. 
+tmodel = nn.Sequential()                                              -- wrapping it all in Sequential brings forward / backward methods to all layers in one go
+tmodel:add(nn.Sequencer(nn.Identity()))                               -- untransfomed input data
+-- tmodel:add(nn.Sequencer(nn.Sigmoid()))   
+tmodel:add(nn.Sequencer(nn.FastLSTM(inputSize, hiddenSize, rho )))    --rho     -- will create a complex network of lstm cells that learns back rho timesteps
+--tmodel:add(nn.Sequencer(nn.FastLSTM(hiddenSize, hiddenSize, rho )))   --rho  -- will create a complex network of lstm cells that learns back rho timesteps
+                                                                      -- I'm sticking in a place to do dropout, not strictly needed I don't think
+--tmodel:add(nn.Sequencer(nn.Tanh())) 
+-- tmodel:add(nn.Sequencer(nn.FastLSTM(hiddenSize, hiddenSize, rho))) -- creating a second layer of lstm cells, coz I can 
+--tmodel:add(nn.Sequencer(nn.Dropout(dropoutProb)))
+-- tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, hiddenSize2)))           -- reduce the output back down to the output class nodes
+tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, outputSize)))           -- reduce the output back down to the output class nodes
+tmodel:add(nn.Sequencer(nn.LogSoftMax()))                             -- apply the log soft max, as we're guessing classes. 
 
 
---criterion = nn.SequencerCriterion(nn.MSECriterion())      -- if you want a regression, use mse
-criterion = nn.SequencerCriterion(nn.ClassNLLCriterion())   -- if you want a classifier, use this. 
-                                                            -- note lua arrays indexed at 1, so binary class flags are like [1,2], [2,1] not [0,1],[1,0]
+-- set criterion
+                                                                    -- arrays indexed at 1, so target class to be like [1,2], [2,1] not [0,1],[1,0]
+--criterion = nn.SequencerCriterion(nn.MSECriterion())              -- if you want a regression, use mse
+criterion = nn.SequencerCriterion(nn.ClassNLLCriterion())           -- if you want a classifier, use this. 
+-- criterion = nn.CrossEntropyCriterion()                           -- potential alt for LogSoftMax / ClassNLLCriterion, but you pass it 1d weights (??)
+
+
+
+
 --[[ set out learning functions ]]--
 
 -- code borrowed from an example by fabio. thanks!
 function gradientUpgrade(model, x, y, criterion, learningRate, i)
+  model:zeroGradParameters()
 	local prediction = model:forward(x)
 	local err = criterion:forward(prediction, y)
    if i % 10 == 0 then
@@ -228,9 +243,9 @@ for line in f:lines() do              -- the file iterator, iterates by lines in
                 -- char class of [U,D] becomes {{2,1},{1,2}} 
                 
                 if line.char_output == "U" then                           
-                      feed_output[batchcounter] = torch.Tensor({2, 1})    
-                else                                                     
-                      feed_output[batchcounter] = torch.Tensor({1, 2})    
+                      feed_output[batchcounter] = torch.Tensor({2,1})    
+                else   -- then must be "U"                                               
+                      feed_output[batchcounter] = torch.Tensor({1,2})    
                 end   
                 
         --[[ TRAIN THE RNN ]]-- (note we are still inside the file iterator here)
@@ -240,7 +255,13 @@ for line in f:lines() do              -- the file iterator, iterates by lines in
           
           -- now send this batch episode to rnn backprop through time learning
          
+          -- to use the cross entropy criterion, I need to hack my targets to just a 1d tensor
+          -- feed_output = feed_output:view(-1)
+          --local feed_target = feed_output[batchounter]:view(-1)
+          
           gradientUpgrade(tmodel, feed_input, feed_output, criterion, lr, episode)
+          
+          
           
           -- now clear out the tables, reset them     
           feed_input = nil; feed_input = {}
@@ -293,11 +314,25 @@ for line in f:lines() do              -- the file iterator, iterates by lines in
                                          }
                                         )
             
+            prediction_output = torch.Tensor()
             prediction_output = tmodel:forward(realtime_input)
 
-            print(line.char_output)
-            pprint(prediction_output) -- the output I'm printing looks very ugly. a thing to fix
+            --print(line.char_output)
+            --pprint(prediction_output[1]:exp())
+            local classProbabilities = {}
+            local classPrediction = ""
+            classProbabilities = torch.totable(prediction_output[1]:exp())
             
+            if classProbabilities[1] > classProbabilities[2] then
+                 classPrediction = "Up"
+            else classPrediction = "Down"
+            end
+              
+            
+            print (line.char_output .. "," .. classProbabilities[1] .. "," .. classProbabilities[2] .. "," .. classPrediction)
+            
+            -- the output I'm printing looks very ugly. a thing to fix
+            -- pprint(prediction_output)
         end -- end of validation condition
 
   end -- end of csv iterator
