@@ -12,22 +12,18 @@ NOTES:
 
 I moved on to the rnn library as I got very muddled trying to figure out how to train my own lstm.
 
-This code still not managing to learn properly. I'm getting an issues with a nil gradient error.
-I'm still working on this - if anyone figures out the bug, let me know
-
-
-
+This code still not managing to learn properly I don't think, 
 
 
 Current experiment design:
 
-a. stream in csv timeseries data (don't read it all in at once, my files bigger than ram)
+a. stream in csv timeseries data, don't read it all in at once. (future files maybe bigger than ram)
 
-b. feed this data into the example lstm. every rho steps, build a table of tensors and feed it to learning...
+b. feed this data into the FastLSTM lib. Every batchsize steps, build a table of tensors and feed it to learning...
 
 d. do some training - to make it simple, train on the first x rows of the timeseries, then guess the remainder
 
-e. print the predictions, alongside the actual to get a sense of whether it worked
+e. print the predictions, alongside the actual to get a minimal sense of whether it worked
 
 to run:
 
@@ -35,3 +31,4 @@ to run:
 
 depends on an installation of torch7 and the csv library found here:
 https://github.com/geoffleyland/lua-csv
+
