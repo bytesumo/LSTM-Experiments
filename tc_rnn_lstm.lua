@@ -60,7 +60,7 @@ network's predictions alongside the training target "output" values for inspecti
 ]]
 
 -- print(whohow)
-require('mobdebug').start()
+-- require('mobdebug').start()
 
 --[[ require libraries ]]--
         -- require 'nn'
@@ -70,11 +70,16 @@ require('mobdebug').start()
 
 local csv = require("csv")
 require 'rnn'
+require 'cltorch'
+require 'clnn'
+require 'pprint'
+
 --[[ configure csv reading]]--
 
 local filename = "dp_10_train_DJI_min.csv"
-local threshold = 100000                     -- train up to this offset, then predict.
+                    -- train up to this offset, then predict.
 local csvparams ={}
+
 csvparams.header = true
 csvparams.separator = ","
 
@@ -122,13 +127,15 @@ csvparams.columns = {  -- we list possible header aliases, and map them to our s
 --[[ model definition params ]]--
 
 
+local threshold = 100000 
 local inputSize = 28
-local hiddenSize = 5
+local hiddenSize = 50
 local outputSize = 2
-local dropoutProb = 0.9
-local rho = 1000
-local lr = 0.00000001
-nIndex = 10000 -- I think this is the batch size?
+local dropoutProb = 0.2
+local rho = 50
+local batchSize = 200
+local lr = 0.001
+
 
 
 --[[ build up model definition ]]--
@@ -137,21 +144,25 @@ nIndex = 10000 -- I think this is the batch size?
 
 tmodel = nn.Sequential()
 tmodel:add(nn.Sequencer(nn.Identity()))
+
 tmodel:add(nn.Sequencer(nn.FastLSTM(inputSize, hiddenSize, rho))) ----update rnn package was fix for failures on this call
+tmodel:add(nn.Sequencer(nn.Dropout(dropoutProb)))
+
+tmodel:add(nn.Sequencer(nn.FastLSTM(hiddenSize, hiddenSize, rho))) 
+
 tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, outputSize)))
+tmodel:add(nn.Sequencer(nn.LogSoftMax()))
 
-criterion = nn.SequencerCriterion(nn.MSECriterion())
 
-
+--criterion = nn.SequencerCriterion(nn.MSECriterion())      -- if you want a regression, use mse
+criterion = nn.SequencerCriterion(nn.ClassNLLCriterion())   -- if you want a classifier, use this. Outputs must be like [1,2] or [2,1] etc not [0,1][1,0]
 --[[ set out learning functions ]]--
 
 
 function gradientUpgrade(model, x, y, criterion, learningRate, i)
-  -- print(model)
 	local prediction = model:forward(x)
-  print(prediction[1])
 	local err = criterion:forward(prediction, y)
-   if i % 1 == 0 then
+   if i % 10 == 0 then
       print('error for iteration ' .. i  .. ' is ' .. err/rho)
    end
 	local gradOutputs = criterion:backward(prediction, y)
@@ -165,24 +176,29 @@ end
 
 --[[ FEED THE NETWORK WITH VALUES ]]--
 
+-- initialise some of the file counters
+local offset = 0
+local batchcounter = 0
+local episode = 0
 
 -- Open file iterator:
-local offset = 0
 local f = csv.open(filename, csvparams)
 
 -- create structured lua tables from csv. for the moment they are global till I figure stuff out
+
 feed_input = {}     -- create a table to hold our input data we'll use to predict, I want a table of tensors
 feed_output = {}    -- create a table to hold our target outputs to train against
-feed_offsets = {}   -- create a table to hold our batch offset references
+feed_offsets = {}   -- create a table to hold our batch offset references -- not sure I need this
 
 for line in f:lines() do
-    offset = offset + 1  
+    offset = offset + 1               -- this is a global file offset
+    batchcounter = batchcounter +1    -- this tracks the offset inside an episode (aka chunk of time, the max length of which is rho)
     -- We load up our data row by row into a table, then after 100 rows, we flush to tensor, and feed it to the training as a mini-batch
                 -- this needs changing. My input needs to be a tensor for each line
                 -- and then I collect up a table of tensors indexed by offset until I hit rho. Do this for both input and targets (I think)
                
                 --feed_input[offset] = 
-                feed_input[offset] = torch.Tensor(  
+                feed_input[batchcounter] = torch.Tensor(  
                                           {  -- insert inputs into standard training dataset table, indexed by this offset
                                             tonumber(line.percent_change)             
                                           , tonumber(line.t1)
@@ -219,49 +235,87 @@ for line in f:lines() do
                                       -- )
                 -- construct training labels to learn
                 if line.char_output == "U" then        -- transform our char class [U,D] into two nodes of numeric [1,1] outputs
-                      feed_output[offset] = torch.Tensor({1, -1})  --  torch.Tensor({1,0}) 
-                else
-                      feed_output[offset] = torch.Tensor({-1, 1}) -- torch.Tensor({0,1})   
+                      feed_output[batchcounter] = torch.Tensor({2, 1})  --  torch.Tensor({2,1}) 
+                else -- then line.chart_output must be "D"
+                      feed_output[batchcounter] = torch.Tensor({1, 2}) -- torch.Tensor({1,2}) , remember classes indexed from 1 .. n  
                 end   
                 
                 -- create an index of the offsets, needed for batch processing
-                table.insert(feed_offsets, offset)
+                -- table.insert(feed_offsets, batchcounter)
                 -- offset = 0
-        
         
         --[[ TRAIN THE RNN ]]--
 
 
-        if offset < threshold and offset % rho == 0 then
+        if offset < threshold and offset % batchSize == 0 then -- rho defines the episode size
+          episode = episode + 1                          -- episode counter tracks the total number of episodes we've created
           
-          -- now I have a batch size of 100 records, convert tables to tensors
-          ---[[
-          -- print(feed_input)
-          
-          --local tensor_input = torch.Tensor(feed_input)
-          --local tensor_output = torch.Tensor(feed_output)
-          --local tensor_offsets = torch.LongTensor(feed_offsets)
-          -- print(tensor_offsets)
-          --]]
           -- now send the batch to learning
-          -- print(feed_output)
-          gradientUpgrade(tmodel, feed_input, feed_output, criterion, lr, offset)
+         
+          gradientUpgrade(tmodel, feed_input, feed_output, criterion, lr, episode)
           
           -- now clear out the tables, reset them     
-          feed_input = nil
-          feed_input = {}
-          feed_output = nil
-          feed_output = {}
-          feed_offsets = nil
-          feed_offsets = {}
+          feed_input = nil; feed_input = {}
+          feed_output = nil; feed_output = {}
+          feed_offsets = nil; feed_offsets = {}
+          batchcounter = 0
+          
           -- I delete these down as the next loop will rebuild these up to the next offset % 100 batch...
-        end
+        end -- of the rho episode-sized block condition
         
         if offset > threshold then
           
-            -- TEST OF PREDICTION --
-            local prediction_output = tmodel:forward(feed_input)
-            print(line.char_output, prediction_output)
+            -- TEST OF PREDICTION --            
+            -- grab the current row of inputs, and generate prediction
+            
+            local realtime_input = {}
+            realtime_input[1] = torch.Tensor(  
+                                          {  -- insert inputs into standard training dataset table, indexed by this offset
+                                            tonumber(line.percent_change)             
+                                          , tonumber(line.t1)
+                                          , tonumber(line.t2)
+                                          , tonumber(line.t3)
+                                          , tonumber(line.t4)
+                                          , tonumber(line.t5)
+                                          , tonumber(line.t6)
+                                          , tonumber(line.t7)
+                                          , tonumber(line.t8)
+                                          , tonumber(line.t9)
+                                          , tonumber(line.t10)
+                                          , tonumber(line.t11)
+                                          , tonumber(line.t12)
+                                          , tonumber(line.t13)
+                                          , tonumber(line.t14)
+                                          , tonumber(line.t15)
+                                          , tonumber(line.t16)
+                                          , tonumber(line.t17)
+                                          , tonumber(line.t18)
+                                          , tonumber(line.t19)
+                                          , tonumber(line.t20)
+                                          , tonumber(line.t21)
+                                          , tonumber(line.t22)
+                                          , tonumber(line.t23)
+                                          , tonumber(line.t24)
+                                          , tonumber(line.t25)
+                                          , tonumber(line.t26)
+                                          , tonumber(line.t27)
+                                         }
+                                        )
+                                        
+            -- if realtime_input:size() == 28 then
+            
+            prediction_output = tmodel:forward(realtime_input)
+            
+            -- end
+            --local output = tensor.totable(prediction_output[1])
+            --local guess = ""
+            --if output[1] > output[1]
+            --  then guess = "up"
+            --else guess = "down"
+            --end
+
+            print(line.char_output, "< the target")
+            pprint(prediction_output)
             
         end
 
