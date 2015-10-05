@@ -76,8 +76,7 @@ require 'pprint'
 
 --[[ configure csv reading]]--
 
-local filename = "dp_10_train_DJI_min.csv"
-                    -- train up to this offset, then predict.
+local filename = "dp_10_train_DJI_min.csv"               
 local csvparams ={}
 
 csvparams.header = true
@@ -126,39 +125,33 @@ csvparams.columns = {  -- we list possible header aliases, and map them to our s
 
 --[[ model definition params ]]--
 
-
-local threshold = 100000 
-local inputSize = 28
-local hiddenSize = 50
-local outputSize = 2
-local dropoutProb = 0.2
-local rho = 50
-local batchSize = 200
-local lr = 0.001
-
-
+local threshold = 100000  -- train up to this offset in the file, then predict.
+local inputSize = 28      -- the number features in the csv file to use as inputs 
+local hiddenSize = 50     -- the number of hidden nodes
+local outputSize = 2      -- the number of outputs representing the prediction targat. 
+local dropoutProb = 0.2   -- a dropout probability, might help with generalisation
+local rho = 50            -- the timestep history we'll recurse back in time when we apply gradient learning
+local batchSize = 200     -- the size of the episode/batch of sequenced timeseries we'll feed the rnn
+local lr = 0.001          -- the learning rate to apply to the weights
 
 --[[ build up model definition ]]--
 
----[[ -- ALL OF THE COMMENT OUT SECTION THROWS AN ERROR ARISING IN FastLSTM
-
-tmodel = nn.Sequential()
-tmodel:add(nn.Sequencer(nn.Identity()))
-
-tmodel:add(nn.Sequencer(nn.FastLSTM(inputSize, hiddenSize, rho))) ----update rnn package was fix for failures on this call
-tmodel:add(nn.Sequencer(nn.Dropout(dropoutProb)))
-
-tmodel:add(nn.Sequencer(nn.FastLSTM(hiddenSize, hiddenSize, rho))) 
-
-tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, outputSize)))
-tmodel:add(nn.Sequencer(nn.LogSoftMax()))
+-- create a trend guessing model, "tmodel"
+tmodel = nn.Sequential()   -- wrapping it all in Sequential brings forward / backward methods to all layers in one go
+tmodel:add(nn.Sequencer(nn.Identity())) -- untransfomed input data
+tmodel:add(nn.Sequencer(nn.FastLSTM(inputSize, hiddenSize, rho)))  -- will create a complex network of lstm cells that learns back rho timesteps
+tmodel:add(nn.Sequencer(nn.Dropout(dropoutProb)))                  -- I'm sticking in a place to do dropout, not strickly needed I don't think
+tmodel:add(nn.Sequencer(nn.FastLSTM(hiddenSize, hiddenSize, rho))) -- creating a second layer of lstm cells, coz I can 
+tmodel:add(nn.Sequencer(nn.Linear(hiddenSize, outputSize)))        -- reduce the output back down to the output class nodes
+tmodel:add(nn.Sequencer(nn.LogSoftMax()))                          -- apply the log soft max, as we're guessing classes. 
 
 
 --criterion = nn.SequencerCriterion(nn.MSECriterion())      -- if you want a regression, use mse
-criterion = nn.SequencerCriterion(nn.ClassNLLCriterion())   -- if you want a classifier, use this. Outputs must be like [1,2] or [2,1] etc not [0,1][1,0]
+criterion = nn.SequencerCriterion(nn.ClassNLLCriterion())   -- if you want a classifier, use this. 
+                                                            -- note lua arrays indexed at 1, so binary class flags are like [1,2], [2,1] not [0,1],[1,0]
 --[[ set out learning functions ]]--
 
-
+-- code borrowed from an example by fabio. thanks!
 function gradientUpgrade(model, x, y, criterion, learningRate, i)
 	local prediction = model:forward(x)
 	local err = criterion:forward(prediction, y)
@@ -173,7 +166,6 @@ function gradientUpgrade(model, x, y, criterion, learningRate, i)
   end
 end
 
-
 --[[ FEED THE NETWORK WITH VALUES ]]--
 
 -- initialise some of the file counters
@@ -181,7 +173,7 @@ local offset = 0
 local batchcounter = 0
 local episode = 0
 
--- Open file iterator:
+-- Open the file iterator. -- this is a streamed csv parser, it doesn't read the file into ram first, but in chunks (like sax parsing on xml....)
 local f = csv.open(filename, csvparams)
 
 -- create structured lua tables from csv. for the moment they are global till I figure stuff out
@@ -190,14 +182,13 @@ feed_input = {}     -- create a table to hold our input data we'll use to predic
 feed_output = {}    -- create a table to hold our target outputs to train against
 feed_offsets = {}   -- create a table to hold our batch offset references -- not sure I need this
 
-for line in f:lines() do
-    offset = offset + 1               -- this is a global file offset
-    batchcounter = batchcounter +1    -- this tracks the offset inside an episode (aka chunk of time, the max length of which is rho)
-    -- We load up our data row by row into a table, then after 100 rows, we flush to tensor, and feed it to the training as a mini-batch
-                -- this needs changing. My input needs to be a tensor for each line
-                -- and then I collect up a table of tensors indexed by offset until I hit rho. Do this for both input and targets (I think)
-               
-                --feed_input[offset] = 
+for line in f:lines() do              -- the file iterator, iterates by lines in my csv raw data file
+    offset = offset + 1               -- this is a global file offset, counts the rownumber of the raw file
+    
+                -- inputs to learn from --
+                batchcounter = batchcounter +1    -- this tracks the offset inside an episode (aka chunk of time, the max length of which is rho)
+                -- notes:
+                -- We load up our lua table, row by row indexed 1 .. batchSize, and for each row, we insert a tensor of input records. 
                 feed_input[batchcounter] = torch.Tensor(  
                                           {  -- insert inputs into standard training dataset table, indexed by this offset
                                             tonumber(line.percent_change)             
@@ -231,26 +222,23 @@ for line in f:lines() do
                                          }
                                         )
                  
-                 -- print(feed_input[offset])
-                                      -- )
-                -- construct training labels to learn
-                if line.char_output == "U" then        -- transform our char class [U,D] into two nodes of numeric [1,1] outputs
-                      feed_output[batchcounter] = torch.Tensor({2, 1})  --  torch.Tensor({2,1}) 
-                else -- then line.chart_output must be "D"
-                      feed_output[batchcounter] = torch.Tensor({1, 2}) -- torch.Tensor({1,2}) , remember classes indexed from 1 .. n  
+                --[[ targets to learn ]]--
+                
+                -- construct flags that map to our training labels. (Remember classes indexed from 1 .. n), so our
+                -- char class of [U,D] becomes {{2,1},{1,2}} 
+                
+                if line.char_output == "U" then                           
+                      feed_output[batchcounter] = torch.Tensor({2, 1})    
+                else                                                     
+                      feed_output[batchcounter] = torch.Tensor({1, 2})    
                 end   
                 
-                -- create an index of the offsets, needed for batch processing
-                -- table.insert(feed_offsets, batchcounter)
-                -- offset = 0
-        
-        --[[ TRAIN THE RNN ]]--
+        --[[ TRAIN THE RNN ]]-- (note we are still inside the file iterator here)
 
-
-        if offset < threshold and offset % batchSize == 0 then -- rho defines the episode size
-          episode = episode + 1                          -- episode counter tracks the total number of episodes we've created
+        if offset < threshold and offset % batchSize == 0 then    -- bactSize defines the episode size
+          episode = episode + 1                                   -- create a counter that tracks the total number of episodes we've created
           
-          -- now send the batch to learning
+          -- now send this batch episode to rnn backprop through time learning
          
           gradientUpgrade(tmodel, feed_input, feed_output, criterion, lr, episode)
           
@@ -258,13 +246,16 @@ for line in f:lines() do
           feed_input = nil; feed_input = {}
           feed_output = nil; feed_output = {}
           feed_offsets = nil; feed_offsets = {}
+          
+          -- reset the rowID of the batch episode back to zero
           batchcounter = 0
           
-          -- I delete these down as the next loop will rebuild these up to the next offset % 100 batch...
-        end -- of the rho episode-sized block condition
+        end -- end of the batchSize full event trigger 
         
-        if offset > threshold then
-          
+        --[[ Validation ]]--
+        
+        if offset > threshold then        -- we have now rolled through the timeseries learning, but can we guess the ending?   
+                                          -- note we are still inside the file iterator. 
             -- TEST OF PREDICTION --            
             -- grab the current row of inputs, and generate prediction
             
@@ -301,24 +292,16 @@ for line in f:lines() do
                                           , tonumber(line.t27)
                                          }
                                         )
-                                        
-            -- if realtime_input:size() == 28 then
             
             prediction_output = tmodel:forward(realtime_input)
-            
-            -- end
-            --local output = tensor.totable(prediction_output[1])
-            --local guess = ""
-            --if output[1] > output[1]
-            --  then guess = "up"
-            --else guess = "down"
-            --end
 
-            print(line.char_output, "< the target")
-            pprint(prediction_output)
+            print(line.char_output)
+            pprint(prediction_output) -- the output I'm printing looks very ugly. a thing to fix
             
-        end
+        end -- end of validation condition
 
   end -- end of csv iterator
   
+
+
 
