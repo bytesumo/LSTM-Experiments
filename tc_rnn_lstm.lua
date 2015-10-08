@@ -74,8 +74,8 @@ require 'pprint'
 
 --[[ configure csv reading]]--
 
---local filename = "dp_30_train_all_stocks.csv"
-local filename = "../train/1444307892/dp_30_train_all_stocks.csv"
+local filename = "dp_30_train_all_stocks.csv"
+-- local filename = "../train/1444307892/dp_30_train_all_stocks.csv"
 local csvparams ={}
 
 csvparams.header = true
