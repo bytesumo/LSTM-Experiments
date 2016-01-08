@@ -1,5 +1,7 @@
 # LSTM-Experiments
 
+[![Join the chat at https://gitter.im/bytesumo/LSTM-Experiments](https://badges.gitter.im/bytesumo/LSTM-Experiments.svg)](https://gitter.im/bytesumo/LSTM-Experiments?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 Torch7 LSTM Experiment
 
 
